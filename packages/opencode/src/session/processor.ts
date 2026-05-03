@@ -333,6 +333,14 @@ export const layer: Layer.Layer<
               },
               timestamp: DateTime.makeUnsafe(Date.now()),
             })
+
+            // Runtime fix: Abort tool calls with empty args to prevent infinite loops (e.g. gpt-5.5 streaming defect)
+            const isEmptyArgs = Object.keys(value.input ?? {}).length === 0
+            if (isEmptyArgs) {
+              slog.info("Empty tool args detected, aborting", { tool: value.toolName })
+              yield* failToolCall(value.toolCallId, new Error("Empty tool arguments received. Aborting to prevent loop."))
+              return
+            }
             yield* updateToolCall(value.toolCallId, (match) => ({
               ...match,
               tool: value.toolName,
