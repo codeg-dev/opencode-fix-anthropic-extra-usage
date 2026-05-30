@@ -123,6 +123,60 @@ describe("session messages endpoint", () => {
     )
   })
 
+  test("marks stale running tool parts as interrupted for idle sessions", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await withoutWatcher(() =>
+      Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const session = await svc.create({})
+          const messageID = MessageID.ascending()
+          await svc.updateMessage({
+            id: messageID,
+            sessionID: session.id,
+            role: "assistant",
+            parentID: undefined,
+            modelID: "test",
+            providerID: "test",
+            mode: "test",
+            agent: "test",
+            path: { cwd: tmp.path, root: tmp.path },
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            time: { created: Date.now() - 10_000 },
+          } as unknown as MessageV2.Assistant)
+          await svc.updatePart({
+            id: PartID.ascending(),
+            sessionID: session.id,
+            messageID,
+            type: "tool",
+            tool: "read",
+            callID: "call-stale-running",
+            state: {
+              status: "running",
+              input: { filePath: "README.md" },
+              time: { start: Date.now() - 10_000 },
+            },
+          })
+
+          const app = Server.Default().app
+          const res = await app.request(`/session/${session.id}/message`)
+          expect(res.status).toBe(200)
+          const body = (await res.json()) as MessageV2.WithParts[]
+          const tool = body[0]?.parts[0]
+          expect(tool?.type).toBe("tool")
+          if (!tool || tool.type !== "tool") return
+          expect(tool.state.status).toBe("error")
+          if (tool.state.status !== "error") return
+          expect(tool.state.error).toBe("Tool execution was interrupted")
+          expect(tool.state.metadata?.interrupted).toBe(true)
+
+          await svc.remove(session.id)
+        },
+      }),
+    )
+  })
+
   test("rejects invalid cursors and missing sessions", async () => {
     await using tmp = await tmpdir({ git: true })
     await withoutWatcher(() =>

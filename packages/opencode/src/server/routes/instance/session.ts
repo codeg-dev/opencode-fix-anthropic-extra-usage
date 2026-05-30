@@ -30,6 +30,31 @@ import { jsonRequest, runRequest } from "./trace"
 
 const log = Log.create({ service: "server" })
 
+function interruptIdleToolParts(messages: MessageV2.WithParts[], active: boolean): MessageV2.WithParts[] {
+  if (active) return messages
+  return messages.map((message) => ({
+    ...message,
+    parts: message.parts.map((part) => {
+      if (part.type !== "tool") return part
+      if (part.state.status !== "pending" && part.state.status !== "running") return part
+      const end = Date.now()
+      return {
+        ...part,
+        state: {
+          status: "error",
+          input: part.state.input,
+          error: "Tool execution was interrupted",
+          metadata: { interrupted: true },
+          time: {
+            start: part.state.status === "running" ? part.state.time.start : end,
+            end,
+          },
+        },
+      } satisfies MessageV2.ToolPart
+    }),
+  }))
+}
+
 export const SessionRoutes = lazy(() =>
   new Hono()
     .get(
@@ -60,6 +85,7 @@ export const SessionRoutes = lazy(() =>
             .meta({ description: "Filter sessions updated on or after this timestamp (milliseconds since epoch)" }),
           search: z.string().optional().meta({ description: "Filter sessions by title (case-insensitive)" }),
           limit: z.coerce.number().optional().meta({ description: "Maximum number of sessions to return" }),
+          archived: z.coerce.boolean().optional().meta({ description: "Include archived sessions (default false)" }),
         }),
       ),
       async (c) => {
@@ -71,6 +97,7 @@ export const SessionRoutes = lazy(() =>
           start: query.start,
           search: query.search,
           limit: query.limit,
+          archived: query.archived,
         })) {
           sessions.push(session)
         }
@@ -661,8 +688,11 @@ export const SessionRoutes = lazy(() =>
             c,
             Effect.gen(function* () {
               const session = yield* Session.Service
+              const status = yield* SessionStatus.Service
               yield* session.get(sessionID)
-              return yield* session.messages({ sessionID })
+              const messages = yield* session.messages({ sessionID })
+              const current = yield* status.get(sessionID)
+              return interruptIdleToolParts(messages, current.type === "busy")
             }),
           )
           return c.json(messages)
@@ -673,6 +703,15 @@ export const SessionRoutes = lazy(() =>
           limit: query.limit,
           before: query.before,
         })
+        const status = await runRequest(
+          "SessionRoutes.messages.status",
+          c,
+          Effect.gen(function* () {
+            const svc = yield* SessionStatus.Service
+            return yield* svc.get(sessionID)
+          }),
+        )
+        const items = interruptIdleToolParts(page.items, status.type === "busy")
         if (page.cursor) {
           const url = new URL(c.req.url)
           url.searchParams.set("limit", query.limit.toString())
@@ -681,7 +720,7 @@ export const SessionRoutes = lazy(() =>
           c.header("Link", `<${url.toString()}>; rel="next"`)
           c.header("X-Next-Cursor", page.cursor)
         }
-        return c.json(page.items)
+        return c.json(items)
       },
     )
     .get(
@@ -716,10 +755,25 @@ export const SessionRoutes = lazy(() =>
       ),
       async (c) => {
         const params = c.req.valid("param")
-        const message = await MessageV2.get({
-          sessionID: params.sessionID,
-          messageID: params.messageID,
-        })
+        const message = await runRequest(
+          "SessionRoutes.message",
+          c,
+          Effect.gen(function* () {
+            const status = yield* SessionStatus.Service
+            const current = yield* status.get(params.sessionID)
+            return interruptIdleToolParts(
+              [
+                yield* Effect.sync(() =>
+                  MessageV2.get({
+                    sessionID: params.sessionID,
+                    messageID: params.messageID,
+                  }),
+                ),
+              ],
+              current.type === "busy",
+            )[0]
+          }),
+        )
         return c.json(message)
       },
     )

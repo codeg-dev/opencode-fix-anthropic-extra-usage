@@ -743,6 +743,7 @@ export function* list(input?: {
   start?: number
   search?: string
   limit?: number
+  archived?: boolean
 }) {
   const project = Instance.project
   const conditions = [eq(SessionTable.project_id, project.id)]
@@ -763,6 +764,9 @@ export function* list(input?: {
   }
   if (input?.search) {
     conditions.push(like(SessionTable.title, `%${input.search}%`))
+  }
+  if (!input?.archived) {
+    conditions.push(isNull(SessionTable.time_archived))
   }
 
   const limit = input?.limit ?? 100

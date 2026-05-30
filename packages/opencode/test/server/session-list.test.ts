@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { Effect } from "effect"
+import z from "zod"
 import { Instance } from "../../src/project/instance"
 import { Session as SessionNs } from "../../src/session"
 import { Log } from "../../src/util"
@@ -15,6 +16,9 @@ const svc = {
   ...SessionNs,
   create(input?: SessionNs.CreateInput) {
     return run(SessionNs.Service.use((svc) => svc.create(input)))
+  },
+  setArchived(input: z.output<typeof SessionNs.SetArchivedInput.zod>) {
+    return run(SessionNs.Service.use((svc) => svc.setArchived(input)))
   },
 }
 
@@ -104,6 +108,28 @@ describe("session.list", () => {
 
         const sessions = [...svc.list({ limit: 2 })]
         expect(sessions.length).toBe(2)
+      },
+    })
+  })
+
+  test("excludes archived sessions by default", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const active = await svc.create({ title: "active-session" })
+        const archived = await svc.create({ title: "archived-session" })
+        await svc.setArchived({ sessionID: archived.id, time: Date.now() })
+
+        const defaultSessions = [...svc.list({ roots: true })]
+        const defaultIds = defaultSessions.map((s) => s.id)
+        expect(defaultIds).toContain(active.id)
+        expect(defaultIds).not.toContain(archived.id)
+
+        const allSessions = [...svc.list({ roots: true, archived: true })]
+        const allIds = allSessions.map((s) => s.id)
+        expect(allIds).toContain(active.id)
+        expect(allIds).toContain(archived.id)
       },
     })
   })
