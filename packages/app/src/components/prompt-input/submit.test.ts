@@ -17,7 +17,15 @@ const optimistic: Array<{
 }> = []
 const optimisticSeeded: boolean[] = []
 const storedSessions: Record<string, Array<{ id: string; title?: string }>> = {}
-const promoted: Array<{ directory: string; sessionID: string }> = []
+const promoted: Array<{
+  directory: string
+  sessionID: string
+  state?: {
+    agent: string
+    model: { providerID: string; modelID: string; variant?: string }
+    variant?: string
+  }
+}> = []
 const sentShell: string[] = []
 const syncedDirectories: string[] = []
 
@@ -90,8 +98,12 @@ beforeAll(async () => {
         current: () => ({ name: "agent" }),
       },
       session: {
-        promote(directory: string, sessionID: string) {
-          promoted.push({ directory, sessionID })
+        promote(directory: string, sessionID: string, state?: {
+          agent: string
+          model: { providerID: string; modelID: string; variant?: string }
+          variant?: string
+        }) {
+          promoted.push({ directory, sessionID, state })
         },
       },
     }),
@@ -261,8 +273,24 @@ describe("prompt submit worktree selection", () => {
     expect(sentShell).toEqual(["/repo/worktree-a", "/repo/worktree-b"])
     expect(syncedDirectories).toEqual(["/repo/worktree-a", "/repo/worktree-a", "/repo/worktree-b", "/repo/worktree-b"])
     expect(promoted).toEqual([
-      { directory: "/repo/worktree-a", sessionID: "session-1" },
-      { directory: "/repo/worktree-b", sessionID: "session-2" },
+      {
+        directory: "/repo/worktree-a",
+        sessionID: "session-1",
+        state: {
+          agent: "agent",
+          model: { providerID: "provider", modelID: "model" },
+          variant: undefined,
+        },
+      },
+      {
+        directory: "/repo/worktree-b",
+        sessionID: "session-2",
+        state: {
+          agent: "agent",
+          model: { providerID: "provider", modelID: "model" },
+          variant: undefined,
+        },
+      },
     ])
     expect(syncedDirectories).toEqual(["/repo/worktree-a", "/repo/worktree-a", "/repo/worktree-b", "/repo/worktree-b"])
   })
@@ -326,6 +354,45 @@ describe("prompt submit worktree selection", () => {
         model: { providerID: "provider", modelID: "model", variant: "high" },
       },
     })
+  })
+
+  test("promotes the selected model and variant for a newly created session", async () => {
+    variant = "max"
+
+    const submit = createPromptSubmit({
+      info: () => undefined,
+      imageAttachments: () => [],
+      commentCount: () => 0,
+      autoAccept: () => false,
+      mode: () => "normal",
+      working: () => false,
+      editor: () => undefined,
+      queueScroll: () => undefined,
+      promptLength: (value) => value.reduce((sum, part) => sum + ("content" in part ? part.content.length : 0), 0),
+      addToHistory: () => undefined,
+      resetHistoryNavigation: () => undefined,
+      setMode: () => undefined,
+      setPopover: () => undefined,
+      newSessionWorktree: () => selected,
+      onNewSessionWorktreeReset: () => undefined,
+      onSubmit: () => undefined,
+    })
+
+    const event = { preventDefault: () => undefined } as unknown as Event
+
+    await submit.handleSubmit(event)
+
+    expect(promoted).toEqual([
+      {
+        directory: "/repo/worktree-a",
+        sessionID: "session-1",
+        state: {
+          agent: "agent",
+          model: { providerID: "provider", modelID: "model", variant: "max" },
+          variant: "max",
+        },
+      },
+    ])
   })
 
   test("seeds new sessions before optimistic prompts are added", async () => {
