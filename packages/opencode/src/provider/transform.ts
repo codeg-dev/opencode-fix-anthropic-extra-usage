@@ -94,6 +94,46 @@ function stripTrailingAssistant(msgs: ModelMessage[], model: Provider.Model, opt
   return msgs
 }
 
+function rejectsEmptyAssistantContent(model: Provider.Model) {
+  return (
+    model.api.npm === "@ai-sdk/anthropic" ||
+    model.api.npm === "@ai-sdk/amazon-bedrock" ||
+    model.providerID === "moonshotai" ||
+    model.api.id.toLowerCase().includes("kimi")
+  )
+}
+
+function filterEmptyAssistantContent(msgs: ModelMessage[], model: Provider.Model): ModelMessage[] {
+  const signatureKey = model.api.npm === "@ai-sdk/amazon-bedrock" ? "bedrock" : "anthropic"
+
+  return msgs
+    .map((msg) => {
+      if (msg.role !== "assistant") return msg
+      if (typeof msg.content === "string") {
+        if (msg.content === "") return undefined
+        return msg
+      }
+      if (!Array.isArray(msg.content)) return msg
+      const filtered = msg.content.filter((part) => {
+        if (part.type === "text") {
+          return part.text !== ""
+        }
+        if (part.type === "reasoning") {
+          const providerOptions = part.providerOptions?.[signatureKey]
+          return (
+            part.text.trim().length > 0 ||
+            providerOptions?.signature != null ||
+            providerOptions?.redactedData != null
+          )
+        }
+        return true
+      })
+      if (filtered.length === 0) return undefined
+      return { ...msg, content: filtered }
+    })
+    .filter((msg): msg is ModelMessage => msg !== undefined)
+}
+
 // TODO: fix this stupid inefficient dogshit function
 function normalizeMessages(
   msgs: ModelMessage[],
@@ -162,61 +202,11 @@ function normalizeMessages(
     }
   })
 
-  // Anthropic rejects messages with empty content - filter out empty string messages
-  // and remove empty text/reasoning parts from array content
-  if (model.api.npm === "@ai-sdk/anthropic") {
-    msgs = msgs
-      .map((msg) => {
-        if (typeof msg.content === "string") {
-          if (msg.content === "") return undefined
-          return msg
-        }
-        if (!Array.isArray(msg.content)) return msg
-        const filtered = msg.content.filter((part) => {
-          if (part.type === "text") {
-            return part.text !== ""
-          }
-          if (part.type === "reasoning") {
-            return (
-              part.text.trim().length > 0 ||
-              part.providerOptions?.anthropic?.signature != null ||
-              part.providerOptions?.anthropic?.redactedData != null
-            )
-          }
-          return true
-        })
-        if (filtered.length === 0) return undefined
-        return { ...msg, content: filtered }
-      })
-      .filter((msg): msg is ModelMessage => msg !== undefined && msg.content !== "")
-  }
-
-  // Bedrock specific transforms
-  if (model.api.npm === "@ai-sdk/amazon-bedrock") {
-    msgs = msgs
-      .map((msg) => {
-        if (typeof msg.content === "string") {
-          if (msg.content === "") return undefined
-          return msg
-        }
-        if (!Array.isArray(msg.content)) return msg
-        const filtered = msg.content.filter((part) => {
-          if (part.type === "text") {
-            return part.text !== ""
-          }
-          if (part.type === "reasoning") {
-            return (
-              part.text.trim().length > 0 ||
-              part.providerOptions?.bedrock?.signature != null ||
-              part.providerOptions?.bedrock?.redactedData != null
-            )
-          }
-          return true
-        })
-        if (filtered.length === 0) return undefined
-        return { ...msg, content: filtered }
-      })
-      .filter((msg): msg is ModelMessage => msg !== undefined && msg.content !== "")
+  // Some chat-completions compatible providers reject assistant turns with empty content.
+  // Keep this provider-scoped so OpenAI encrypted reasoning and other tolerant providers
+  // can preserve their empty separator parts.
+  if (rejectsEmptyAssistantContent(model)) {
+    msgs = filterEmptyAssistantContent(msgs, model)
   }
 
   if (model.api.id.includes("claude")) {
