@@ -370,8 +370,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         reset() {
           setStore("draft", undefined)
         },
-        promote(dir: string, session: string) {
-          const next = clone(snapshot())
+        promote(dir: string, session: string, state?: State) {
+          const next = clone(state ?? snapshot())
           if (!next) return
 
           if (dir === sdk.directory) {

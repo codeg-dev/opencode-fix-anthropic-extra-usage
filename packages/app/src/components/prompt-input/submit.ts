@@ -369,6 +369,17 @@ export function createPromptSubmit(input: PromptSubmitInput) {
     }
 
     let session = input.info()
+    const model = {
+      modelID: currentModel.id,
+      providerID: currentModel.provider.id,
+    }
+    const agent = currentAgent.name
+    const selection = {
+      agent,
+      model: { ...model, ...(variant ? { variant } : {}) },
+      variant,
+    }
+
     if (!session && isNewSession) {
       const created = await client.session
         .create()
@@ -384,7 +395,7 @@ export function createPromptSubmit(input: PromptSubmitInput) {
         seed(sessionDirectory, created)
         session = created
         if (shouldAutoAccept) permission.enableAutoAccept(session.id, sessionDirectory)
-        local.session.promote(sessionDirectory, session.id)
+        local.session.promote(sessionDirectory, session.id, selection)
         layout.handoff.setTabs(base64Encode(sessionDirectory), session.id)
         const draftID = search.draftId
         if (draftID)
@@ -404,11 +415,6 @@ export function createPromptSubmit(input: PromptSubmitInput) {
       return
     }
 
-    const model = {
-      modelID: currentModel.id,
-      providerID: currentModel.provider.id,
-    }
-    const agent = currentAgent.name
     const context = prompt.context.items().slice()
     const draft: FollowupDraft = {
       sessionID: session.id,
