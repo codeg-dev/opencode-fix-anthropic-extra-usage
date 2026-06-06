@@ -1603,10 +1603,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
                   <Show when={store.mode !== "shell" && showVariantControl()}>
                     <div
                       data-component="prompt-variant-control"
-                      classList={{
-                        "hidden group-hover/prompt-input:block group-focus-within/prompt-input:block":
-                          !local.model.variant.current() && !store.variantOpen,
-                      }}
+                      data-patch="prompt-variant-always-visible"
                     >
                       <TooltipKeybind
                         placement="top"
