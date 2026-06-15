@@ -1807,14 +1807,122 @@ describe("ProviderTransform.message - anthropic empty content filtering", () => 
           { type: "text", text: "Answer" },
         ],
       },
+      { role: "user", content: "Next" },
     ] as any[]
 
     const result = ProviderTransform.message(msgs, bedrockModel, {})
 
-    expect(result).toHaveLength(2)
+    expect(result).toHaveLength(3)
     expect(result[0].content).toBe("Hello")
     expect(result[1].content).toHaveLength(1)
     expect(result[1].content[0]).toEqual({ type: "text", text: "Answer" })
+    expect(result[2].content).toBe("Next")
+  })
+
+  test("filters empty assistant content for Kimi-compatible providers", () => {
+    const kimiModel = {
+      ...anthropicModel,
+      id: "kimi-for-coding/k2p6",
+      providerID: "kimi-for-coding",
+      api: {
+        id: "kimi-k2.6",
+        url: "https://api.moonshot.ai/v1",
+        npm: "@ai-sdk/openai-compatible",
+      },
+    }
+
+    const msgs = [
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "" },
+      {
+        role: "assistant",
+        content: [
+          { type: "reasoning", text: "" },
+          { type: "text", text: "" },
+          { type: "text", text: "Answer" },
+        ],
+      },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, kimiModel, {})
+
+    expect(result).toHaveLength(2)
+    expect(result[0].content).toBe("Hello")
+    expect(result[1].content).toEqual([{ type: "text", text: "Answer" }])
+  })
+
+  test("strips trailing assistant prefill for Claude Opus 4.8", () => {
+    const claude48Model = {
+      ...anthropicModel,
+      id: "anthropic/claude-opus-4-8",
+      api: {
+        id: "claude-opus-4-8",
+        url: "https://api.anthropic.com",
+        npm: "@ai-sdk/anthropic",
+      },
+    }
+
+    const msgs = [
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "prefill" },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, claude48Model, {})
+
+    expect(result).toHaveLength(1)
+    expect(result[0].role).toBe("user")
+  })
+
+  test("strips trailing assistant tool-call prefill for Claude Sonnet 4.8", () => {
+    const claude48Model = {
+      ...anthropicModel,
+      id: "anthropic/claude-sonnet-4-8",
+      api: {
+        id: "claude-sonnet-4-8",
+        url: "https://api.anthropic.com",
+        npm: "@ai-sdk/anthropic",
+      },
+    }
+
+    const msgs = [
+      { role: "user", content: "Hello" },
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "toolu_1", toolName: "bash", input: { command: "pwd" } }],
+      },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, claude48Model, {})
+
+    expect(result).toHaveLength(1)
+    expect(result[0].role).toBe("user")
+  })
+
+  test("strips text-only assistant prefill when Claude thinking is enabled", () => {
+    const msgs = [
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "thinking prefill" },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, anthropicModel, { thinking: { type: "enabled" } })
+
+    expect(result).toHaveLength(1)
+    expect(result[0].role).toBe("user")
+  })
+
+  test("keeps assistant tool-call prefill when only Claude thinking stripping applies", () => {
+    const msgs = [
+      { role: "user", content: "Hello" },
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "toolu_1", toolName: "bash", input: { command: "pwd" } }],
+      },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, anthropicModel, { thinking: { type: "enabled" } })
+
+    expect(result).toHaveLength(2)
+    expect(result[1].role).toBe("assistant")
   })
 
   test("does not filter for non-anthropic providers", () => {
@@ -1841,6 +1949,28 @@ describe("ProviderTransform.message - anthropic empty content filtering", () => 
     expect(result).toHaveLength(2)
     expect(result[0].content).toBe("")
     expect(result[1].content).toHaveLength(1)
+  })
+
+  test("does not strip trailing assistant prefill for OpenAI-compatible providers", () => {
+    const openaiModel = {
+      ...anthropicModel,
+      providerID: "openai",
+      api: {
+        id: "gpt-4",
+        url: "https://api.openai.com",
+        npm: "@ai-sdk/openai",
+      },
+    }
+
+    const msgs = [
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "prefill" },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, openaiModel, {})
+
+    expect(result).toHaveLength(2)
+    expect(result[1].content).toBe("prefill")
   })
 
   test("leaves valid anthropic assistant tool ordering unchanged", () => {

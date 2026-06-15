@@ -7,6 +7,7 @@ import { useModels } from "@/context/models"
 import { useProviders } from "@/hooks/use-providers"
 import { Persist, persisted } from "@/utils/persist"
 import { cycleModelVariant, getConfiguredAgentVariant, resolveModelVariant } from "./model-variant"
+import { resolveAgentSelectionModel, resolvePromptModel } from "./model-selection"
 import { useSDK } from "./sdk"
 import { useSync } from "./sync"
 import { useServerSDK } from "./server-sdk"
@@ -97,14 +98,6 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       return !!provider?.models[model.modelID] && connected().has(model.providerID)
     }
 
-    const firstModel = (...items: Array<() => ModelKey | undefined>) => {
-      for (const item of items) {
-        const model = item()
-        if (!model) continue
-        if (validModel(model)) return model
-      }
-    }
-
     const pickAgent = (name: string | undefined) => {
       const items = list()
       if (items.length === 0) return
@@ -123,7 +116,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
 
     const scope = createMemo<State | undefined>(() => {
       const session = id()
-      if (!session) return store.draft
+      if (!session) return store.draft ?? saved.session[WORKSPACE_KEY]
       return saved.session[session] ?? handoff.get(handoffKey(serverSDK().scope, sdk().directory, session))
     })
 
@@ -173,8 +166,6 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       }
     }
 
-    const fallback = createMemo<ModelKey | undefined>(() => configuredModel() ?? recentModel() ?? defaultModel())
-
     const agent = {
       list,
       current() {
@@ -198,8 +189,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           const prev = scope()
           const next = {
             agent: item.name,
-            model: item.model ?? prev?.model,
-            variant: item.variant ?? prev?.variant,
+            model: resolveAgentSelectionModel({ previous: prev?.model, agent: item.model }),
+            variant: prev?.variant ?? item.variant,
           } satisfies State
           const session = id()
           if (session) {
@@ -207,6 +198,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             return
           }
           setStore("draft", next)
+          setSaved("session", WORKSPACE_KEY, clone(next))
         })
       },
       move(direction: 1 | -1) {
@@ -226,11 +218,17 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     }
 
     const current = () => {
-      const item = firstModel(
-        () => scope()?.model,
-        () => agent.current()?.model,
-        fallback,
-      )
+      const scoped = scope()?.model
+      const item =
+        scoped && validModel(scoped)
+          ? scoped
+          : resolvePromptModel({
+              scoped: undefined,
+              recent: recentModel(),
+              configured: configuredModel(),
+              agent: agent.current()?.model,
+              providerDefault: defaultModel(),
+            })
       if (!item) return
       return models.find(item)
     }
@@ -268,6 +266,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         return
       }
       setStore("draft", state)
+      setSaved("session", WORKSPACE_KEY, clone(state))
     }
 
     const recent = createMemo(() => models.recent.list().map(models.find).filter(Boolean))

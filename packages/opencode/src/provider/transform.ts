@@ -26,6 +26,46 @@ export function sanitizeSurrogates(content: string) {
   return content.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD")
 }
 
+function isKimiCompatibleModel(model: Provider.Model): boolean {
+  const id = `${model.id} ${model.api.id} ${model.providerID}`.toLowerCase()
+  return id.includes("kimi") || id.includes("moonshot")
+}
+
+// Claude Opus/Sonnet 4.6/4.7/4.8 reject requests whose final message is an
+// assistant turn ("This model does not support assistant message prefill").
+export function supportsAssistantPrefill(model: Provider.Model): boolean {
+  const id = `${model.id} ${model.api.id}`.toLowerCase()
+  if (!id.includes("claude")) return true
+  return ![
+    "opus-4-6",
+    "opus-4.6",
+    "opus-4-7",
+    "opus-4.7",
+    "opus-4-8",
+    "opus-4.8",
+    "sonnet-4-6",
+    "sonnet-4.6",
+    "sonnet-4-7",
+    "sonnet-4.7",
+    "sonnet-4-8",
+    "sonnet-4.8",
+  ].some((version) => id.includes(version))
+}
+
+function stripTrailingAssistant(msgs: ModelMessage[], model: Provider.Model, options: Record<string, unknown>): ModelMessage[] {
+  const stripAllAssistantPrefill = !supportsAssistantPrefill(model)
+  const stripThinkingTextPrefill = options.thinking != null && `${model.id} ${model.api.id}`.toLowerCase().includes("claude")
+  if (!stripAllAssistantPrefill && !stripThinkingTextPrefill) return msgs
+
+  while (msgs.length > 0) {
+    const last = msgs[msgs.length - 1]
+    if (last.role !== "assistant") break
+    if (!stripAllAssistantPrefill && Array.isArray(last.content) && last.content.some((part) => part.type === "tool-call")) break
+    msgs = msgs.slice(0, -1)
+  }
+  return msgs
+}
+
 // Maps npm package to the key the AI SDK expects for providerOptions
 function sdkKey(npm: string): string | undefined {
   switch (npm) {
@@ -65,7 +105,7 @@ function sdkKey(npm: string): string | undefined {
 function normalizeMessages(
   msgs: ModelMessage[],
   model: Provider.Model,
-  _options: Record<string, unknown>,
+  options: Record<string, unknown>,
 ): ModelMessage[] {
   const sanitizeToolResultOutput = (content: ToolResultPart) => {
     if (content.output.type === "text" || content.output.type === "error-text") {
@@ -186,6 +226,26 @@ function normalizeMessages(
       .filter((msg): msg is ModelMessage => msg !== undefined && msg.content !== "")
   }
 
+  // Kimi/Moonshot-compatible endpoints can replay empty assistant separators that poison the next request.
+  if (isKimiCompatibleModel(model)) {
+    msgs = msgs
+      .map((msg) => {
+        if (msg.role !== "assistant") return msg
+        if (typeof msg.content === "string") {
+          if (msg.content === "") return undefined
+          return msg
+        }
+        if (!Array.isArray(msg.content)) return msg
+        const filtered = msg.content.filter((part) => {
+          if (part.type === "text" || part.type === "reasoning") return part.text !== ""
+          return true
+        })
+        if (filtered.length === 0) return undefined
+        return { ...msg, content: filtered }
+      })
+      .filter((msg): msg is ModelMessage => msg !== undefined && msg.content !== "")
+  }
+
   if (model.api.id.includes("claude")) {
     const scrub = (id: string) => id.replace(/[^a-zA-Z0-9_-]/g, "_")
     msgs = msgs.map((msg) => {
@@ -282,6 +342,8 @@ function normalizeMessages(
       }
     })
   }
+
+  msgs = stripTrailingAssistant(msgs, model, options)
 
   if (
     typeof model.capabilities.interleaved === "object" &&
