@@ -32,6 +32,30 @@ import { LLMRequestPrep } from "./llm/request"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
+const GPT55_TOOL_SURFACE_LIMIT = 300
+const GPT55_CORE_ACTIVE_TOOLS = new Set([
+  "apply_patch",
+  "background_output",
+  "bash",
+  "interactive_bash",
+  "invalid",
+  "read",
+  "skill",
+  "task",
+  "todowrite",
+  "webfetch",
+])
+
+function activeToolsForModel(input: StreamInput, tools: Record<string, Tool>) {
+  const names = Object.keys(tools).filter((x) => x !== "invalid")
+  if (input.model.providerID !== "openai") return names
+  if (input.model.id !== "gpt-5.5" && input.model.id !== "gpt-5.5-pro") return names
+  if (names.length <= GPT55_TOOL_SURFACE_LIMIT) return names
+
+  const limited = names.filter((name) => GPT55_CORE_ACTIVE_TOOLS.has(name))
+  return limited.length > 0 ? limited : names
+}
+
 export type StreamInput = {
   user: SessionV1.User
   sessionID: string
@@ -314,7 +338,7 @@ const live: Layer.Layer<
           topP: prepared.params.topP,
           topK: prepared.params.topK,
           providerOptions: ProviderTransform.providerOptions(input.model, prepared.params.options),
-          activeTools: Object.keys(prepared.tools).filter((x) => x !== "invalid"),
+          activeTools: activeToolsForModel(input, prepared.tools),
           tools: prepared.tools,
           toolChoice: input.toolChoice,
           maxOutputTokens: prepared.params.maxOutputTokens,
