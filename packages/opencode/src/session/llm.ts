@@ -32,6 +32,7 @@ import { LLMRequestPrep } from "./llm/request"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
+const OPENAI_RESPONSES_TOOL_LIMIT = 128
 const GPT55_TOOL_SURFACE_LIMIT = 300
 const GPT55_CORE_ACTIVE_TOOLS = new Set([
   "apply_patch",
@@ -54,6 +55,13 @@ function activeToolsForModel(input: StreamInput, tools: Record<string, Tool>) {
 
   const limited = names.filter((name) => GPT55_CORE_ACTIVE_TOOLS.has(name))
   return limited.length > 0 ? limited : names
+}
+
+export function capToolsForModel(input: { model: { api: { npm: string } } }, tools: Record<string, Tool>) {
+  if (input.model.api.npm !== "@ai-sdk/openai") return tools
+  const entries = Object.entries(tools)
+  if (entries.length <= OPENAI_RESPONSES_TOOL_LIMIT) return tools
+  return Object.fromEntries(entries.slice(0, OPENAI_RESPONSES_TOOL_LIMIT))
 }
 
 export type StreamInput = {
@@ -135,6 +143,15 @@ const live: Layer.Layer<
         flags,
         isWorkflow,
       })
+      const toolCount = Object.keys(prepared.tools).length
+      prepared.tools = capToolsForModel(input, prepared.tools)
+      if (Object.keys(prepared.tools).length < toolCount) {
+        yield* Effect.logWarning("tool count exceeds OpenAI Responses limit; capping", {
+          modelID: input.model.id,
+          total: toolCount,
+          kept: Object.keys(prepared.tools).length,
+        })
+      }
 
       // Wire up toolExecutor for DWS workflow models so that tool calls
       // from the workflow service are executed via opencode's tool system

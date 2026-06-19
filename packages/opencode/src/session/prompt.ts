@@ -612,6 +612,20 @@ export const layer = Layer.effect(
       return yield* Effect.die(err)
     })
 
+    const modelFromSessionRow = (model: { id: string; providerID: string; variant?: string | null }) => ({
+      providerID: ProviderV2.ID.make(model.providerID),
+      modelID: ModelV2.ID.make(model.id),
+      ...(model.variant && model.variant !== "default" ? { variant: model.variant } : {}),
+    })
+
+    const sameModel = (left: SessionV1.User["model"], right: SessionV1.User["model"]) =>
+      left.providerID === right.providerID &&
+      left.modelID === right.modelID &&
+      (left.variant ?? "default") === (right.variant ?? "default")
+
+    const syntheticOnlyUser = (m: SessionV1.WithParts) =>
+      m.info.role === "user" && m.parts.length > 0 && m.parts.every((p) => "synthetic" in p && p.synthetic === true)
+
     const currentModel = Effect.fnUntraced(function* (sessionID: SessionID) {
       const current = yield* db
         .select({ model: SessionTable.model })
@@ -619,17 +633,27 @@ export const layer = Layer.effect(
         .where(eq(SessionTable.id, sessionID))
         .get()
         .pipe(Effect.orDie)
-      if (current?.model) {
-        return {
-          providerID: ProviderV2.ID.make(current.model.providerID),
-          modelID: ModelV2.ID.make(current.model.id),
-          ...(current.model.variant && current.model.variant !== "default" ? { variant: current.model.variant } : {}),
-        }
-      }
-      const match = yield* sessions
+      const rowModel = current?.model ? modelFromSessionRow(current.model) : undefined
+      const latestUser = yield* sessions
         .findMessage(sessionID, (m) => m.info.role === "user" && !!m.info.model)
         .pipe(Effect.orDie)
-      if (Option.isSome(match) && match.value.info.role === "user") return match.value.info.model
+      const latestRealUser = yield* sessions
+        .findMessage(sessionID, (m) => m.info.role === "user" && !!m.info.model && !syntheticOnlyUser(m))
+        .pipe(Effect.orDie)
+      if (rowModel) {
+        if (
+          Option.isSome(latestUser) &&
+          latestUser.value.info.role === "user" &&
+          syntheticOnlyUser(latestUser.value) &&
+          sameModel(rowModel, latestUser.value.info.model) &&
+          Option.isSome(latestRealUser) &&
+          latestRealUser.value.info.role === "user"
+        ) {
+          return latestRealUser.value.info.model
+        }
+        return rowModel
+      }
+      if (Option.isSome(latestRealUser) && latestRealUser.value.info.role === "user") return latestRealUser.value.info.model
       return yield* provider.defaultModel().pipe(Effect.orDie)
     })
 
@@ -1160,13 +1184,12 @@ export const layer = Layer.effect(
             !lastAssistant.error &&
             lastAssistantMsg?.parts.length === 0
           ) {
-            lastAssistant.error = MessageV2.fromError(new DOMException("Aborted", "AbortError"), {
-              providerID: lastAssistant.providerID,
-              aborted: true,
-            })
-            lastAssistant.finish = "error"
+            // This is a stale/incomplete assistant row from an interrupted run.
+            // Do not convert it into MessageAbortedError or publish Session.Event.Error:
+            // OmO's fallback hook treats those as retry/fallback triggers, which can
+            // incorrectly switch the main session model during resume.
+            lastAssistant.finish = "stop"
             yield* sessions.updateMessage(lastAssistant)
-            yield* events.publish(Session.Event.Error, { sessionID, error: lastAssistant.error })
             continue
           }
           // Some providers return "stop" even when the assistant message contains
@@ -1271,11 +1294,7 @@ export const layer = Layer.effect(
 
           const finalizeInterruptedAssistant = Effect.gen(function* () {
             if (msg.time.completed && (msg.finish || msg.error)) return
-            msg.error ??= MessageV2.fromError(new DOMException("Aborted", "AbortError"), {
-              providerID: msg.providerID,
-              aborted: true,
-            })
-            msg.finish ??= "error"
+            msg.finish ??= "stop"
             msg.time.completed ??= Date.now()
             yield* sessions.updateMessage(msg)
           })
