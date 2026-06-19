@@ -250,6 +250,26 @@ describe("session.retry.retryable", () => {
     expect(SessionRetry.retryable(error, retryProvider)).toEqual({ message: "Too many requests, please retry later" })
   })
 
+  test("retries OpenAI retry-advisory APIError even when isRetryable is false", () => {
+    const message =
+      "Retry Error: An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx in your message."
+    const error = Schema.decodeUnknownSync(SessionV1.APIError.Schema)(
+      new SessionV1.APIError({
+        message,
+        isRetryable: false,
+      }).toObject(),
+    )
+
+    expect(SessionRetry.retryable(error, retryProvider)).toEqual({ message })
+  })
+
+  test("retries plain text retry-advisory errors", () => {
+    const message =
+      "Retry Error: An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists."
+    const error = wrap(message)
+    expect(SessionRetry.retryable(error, retryProvider)).toEqual({ message })
+  })
+
   test("does not retry 4xx errors when isRetryable is false", () => {
     const error = Schema.decodeUnknownSync(SessionV1.APIError.Schema)(
       new SessionV1.APIError({

@@ -1153,6 +1153,22 @@ export const layer = Layer.effect(
           const lastAssistantMsg = msgs.findLast(
             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
           )
+          if (
+            lastAssistant &&
+            lastAssistant.time.completed &&
+            !lastAssistant.finish &&
+            !lastAssistant.error &&
+            lastAssistantMsg?.parts.length === 0
+          ) {
+            lastAssistant.error = MessageV2.fromError(new DOMException("Aborted", "AbortError"), {
+              providerID: lastAssistant.providerID,
+              aborted: true,
+            })
+            lastAssistant.finish = "error"
+            yield* sessions.updateMessage(lastAssistant)
+            yield* events.publish(Session.Event.Error, { sessionID, error: lastAssistant.error })
+            continue
+          }
           // Some providers return "stop" even when the assistant message contains
           // tool calls. Keep the loop running so tool results can be sent back to
           // the model, but ignore cleanup-marked interrupted orphans.
@@ -1254,14 +1270,26 @@ export const layer = Layer.effect(
           yield* sessions.updateMessage(msg)
 
           const finalizeInterruptedAssistant = Effect.gen(function* () {
-            if (msg.time.completed) return
+            if (msg.time.completed && (msg.finish || msg.error)) return
             msg.error ??= MessageV2.fromError(new DOMException("Aborted", "AbortError"), {
               providerID: msg.providerID,
               aborted: true,
             })
-            msg.time.completed = Date.now()
+            msg.finish ??= "error"
+            msg.time.completed ??= Date.now()
             yield* sessions.updateMessage(msg)
           })
+
+          const finalizeFailedAssistant = (cause: Cause.Cause<unknown>) =>
+            Effect.gen(function* () {
+              if (Cause.hasInterruptsOnly(cause)) return
+              if (msg.finish || msg.error) return
+              msg.error = MessageV2.fromError(Cause.squash(cause), { providerID: msg.providerID })
+              msg.finish = "error"
+              msg.time.completed ??= Date.now()
+              yield* events.publish(Session.Event.Error, { sessionID, error: msg.error })
+              yield* sessions.updateMessage(msg)
+            })
 
           const handle = yield* processor
             .create({
@@ -1269,7 +1297,10 @@ export const layer = Layer.effect(
               sessionID,
               model,
             })
-            .pipe(Effect.onInterrupt(() => finalizeInterruptedAssistant))
+            .pipe(
+              Effect.onInterrupt(() => finalizeInterruptedAssistant),
+              Effect.catchCause((cause) => finalizeFailedAssistant(cause).pipe(Effect.andThen(Effect.failCause(cause)))),
+            )
 
           const outcome: "break" | "continue" = yield* Effect.gen(function* () {
             const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
@@ -1391,6 +1422,7 @@ export const layer = Layer.effect(
           }).pipe(
             Effect.ensuring(instruction.clear(handle.message.id)),
             Effect.onInterrupt(() => finalizeInterruptedAssistant),
+            Effect.catchCause((cause) => finalizeFailedAssistant(cause).pipe(Effect.andThen(Effect.failCause(cause)))),
           )
           if (outcome === "break") break
           continue
