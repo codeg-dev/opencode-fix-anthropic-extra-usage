@@ -626,6 +626,28 @@ export const layer = Layer.effect(
     const syntheticOnlyUser = (m: SessionV1.WithParts) =>
       m.info.role === "user" && m.parts.length > 0 && m.parts.every((p) => "synthetic" in p && p.synthetic === true)
 
+    const recoverSyntheticPollutedModel = Effect.fnUntraced(function* (
+      sessionID: SessionID,
+      candidate: SessionV1.User["model"],
+    ) {
+      const latestUser = yield* sessions
+        .findMessage(sessionID, (m) => m.info.role === "user" && !!m.info.model)
+        .pipe(Effect.orDie)
+      if (
+        Option.isNone(latestUser) ||
+        latestUser.value.info.role !== "user" ||
+        !syntheticOnlyUser(latestUser.value) ||
+        !sameModel(candidate, latestUser.value.info.model)
+      ) {
+        return undefined
+      }
+      const latestRealUser = yield* sessions
+        .findMessage(sessionID, (m) => m.info.role === "user" && !!m.info.model && !syntheticOnlyUser(m))
+        .pipe(Effect.orDie)
+      if (Option.isSome(latestRealUser) && latestRealUser.value.info.role === "user") return latestRealUser.value.info.model
+      return undefined
+    })
+
     const currentModel = Effect.fnUntraced(function* (sessionID: SessionID) {
       const current = yield* db
         .select({ model: SessionTable.model })
@@ -634,25 +656,10 @@ export const layer = Layer.effect(
         .get()
         .pipe(Effect.orDie)
       const rowModel = current?.model ? modelFromSessionRow(current.model) : undefined
-      const latestUser = yield* sessions
-        .findMessage(sessionID, (m) => m.info.role === "user" && !!m.info.model)
-        .pipe(Effect.orDie)
+      if (rowModel) return (yield* recoverSyntheticPollutedModel(sessionID, rowModel)) ?? rowModel
       const latestRealUser = yield* sessions
         .findMessage(sessionID, (m) => m.info.role === "user" && !!m.info.model && !syntheticOnlyUser(m))
         .pipe(Effect.orDie)
-      if (rowModel) {
-        if (
-          Option.isSome(latestUser) &&
-          latestUser.value.info.role === "user" &&
-          syntheticOnlyUser(latestUser.value) &&
-          sameModel(rowModel, latestUser.value.info.model) &&
-          Option.isSome(latestRealUser) &&
-          latestRealUser.value.info.role === "user"
-        ) {
-          return latestRealUser.value.info.model
-        }
-        return rowModel
-      }
       if (Option.isSome(latestRealUser) && latestRealUser.value.info.role === "user") return latestRealUser.value.info.model
       return yield* provider.defaultModel().pipe(Effect.orDie)
     })
@@ -674,7 +681,9 @@ export const layer = Layer.effect(
         .where(eq(SessionTable.id, input.sessionID))
         .get()
         .pipe(Effect.orDie)
-      const model = input.model ?? ag.model ?? (yield* currentModel(input.sessionID))
+      const model = input.model
+        ? ((yield* recoverSyntheticPollutedModel(input.sessionID, input.model)) ?? input.model)
+        : (ag.model ?? (yield* currentModel(input.sessionID)))
       const same = ag.model && model.providerID === ag.model.providerID && model.modelID === ag.model.modelID
       const full =
         !input.variant && ag.variant && same
