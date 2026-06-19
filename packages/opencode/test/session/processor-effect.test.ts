@@ -228,6 +228,31 @@ const fragmentFailureEnv = LayerNode.buildLayer(root, {
 })
 const itFragmentFailure = testEffect(fragmentFailureEnv)
 
+const emptyStreamState = {
+  calls: 0,
+}
+const emptyThenTextLLM = Layer.succeed(
+  LLM.Service,
+  LLM.Service.of({
+    stream: () => {
+      emptyStreamState.calls += 1
+      if (emptyStreamState.calls === 1) return Stream.empty
+      return Stream.make(
+        LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.textStart({ id: "text-1" }),
+        LLMEvent.textDelta({ id: "text-1", text: "after" }),
+        LLMEvent.textEnd({ id: "text-1" }),
+        LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+        LLMEvent.finish({ reason: "stop" }),
+      )
+    },
+  }),
+)
+const emptyStreamEnv = LayerNode.buildLayer(root, {
+  replacements: [...replacements, LayerNode.replace(LLM.node, emptyThenTextLLM)],
+})
+const itEmptyStream = testEffect(emptyStreamEnv)
+
 const boot = Effect.fn("test.boot")(function* () {
   const processors = yield* SessionProcessor.Service
   const session = yield* Session.Service
@@ -513,6 +538,53 @@ it.live("session.processor effect tests reset reasoning state across retries", (
         expect(reasoning.some((part) => part.text === "onetwo")).toBe(false)
       }),
     { config: (url) => providerCfg(url) },
+  ),
+)
+
+itEmptyStream.live("session.processor effect tests retry empty provider streams", () =>
+  provideTmpdirInstance((dir) =>
+    Effect.gen(function* () {
+      emptyStreamState.calls = 0
+      const { processors, session } = yield* boot()
+
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "empty stream")
+      const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+      const mdl = {
+        id: ref.modelID,
+        providerID: ref.providerID,
+        limit: { context: 100_000, output: 10_000 },
+      } as Provider.Model
+      const handle = yield* processors.create({
+        assistantMessage: msg,
+        sessionID: chat.id,
+        model: mdl,
+      })
+
+      const value = yield* handle.process({
+        user: {
+          id: parent.id,
+          sessionID: chat.id,
+          role: "user",
+          time: parent.time,
+          agent: parent.agent,
+          model: { providerID: ref.providerID, modelID: ref.modelID },
+        } satisfies SessionV1.User,
+        sessionID: chat.id,
+        model: mdl,
+        agent: agent(),
+        system: [],
+        messages: [{ role: "user", content: "empty stream" }],
+        tools: {},
+      })
+
+      const parts = yield* MessageV2.parts(msg.id)
+
+      expect(value).toBe("continue")
+      expect(emptyStreamState.calls).toBe(2)
+      expect(parts.some((part) => part.type === "text" && part.text === "after")).toBe(true)
+      expect(handle.message.error).toBeUndefined()
+    }),
   ),
 )
 

@@ -70,9 +70,16 @@ export function retryable(error: Err, provider: string) {
   if (SessionV1.ContextOverflowError.isInstance(error)) return undefined
   if (SessionV1.APIError.isInstance(error)) {
     const status = error.data.statusCode
-    // 5xx errors are transient server failures and should always be retried,
-    // even when the provider SDK doesn't explicitly mark them as retryable.
-    if (!error.data.isRetryable && !(status !== undefined && status >= 500)) return undefined
+    const lower = `${error.data.message}\n${error.data.responseBody ?? ""}`.toLowerCase()
+    const rateLimited =
+      status === 429 ||
+      lower.includes("rate limit") ||
+      lower.includes("rate limited") ||
+      lower.includes("too many requests")
+    // 5xx errors and provider rate limits are transient failures and should be
+    // retried even when the provider SDK doesn't explicitly mark them as
+    // retryable.
+    if (!error.data.isRetryable && !(status !== undefined && status >= 500) && !rateLimited) return undefined
     if (error.data.responseBody?.includes("FreeUsageLimitError")) {
       return {
         message: GO_UPSELL_MESSAGE,
