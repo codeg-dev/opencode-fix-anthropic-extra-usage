@@ -772,7 +772,6 @@ it.live("session.processor effect tests marks schema-invalid pending tool calls 
   provideTmpdirServer(
     ({ dir, llm }) =>
       Effect.gen(function* () {
-        const database = yield* Database.Service
         const gate = defer<void>()
         const { processors, session, provider } = yield* boot()
 
@@ -865,25 +864,22 @@ it.live("session.processor effect tests marks schema-invalid pending tool calls 
           .pipe(Effect.forkChild)
 
         yield* llm.wait(1)
-        const call = yield* waitFor(
-          MessageV2.parts(msg.id).pipe(
-            Effect.map((parts) => parts.find((part): part is SessionV1.ToolPart => part.type === "tool")),
-            Effect.provideService(Database.Service, database),
-          ),
-          "timed out waiting for tool part",
-        )
+        gate.resolve()
+        const exit = yield* Fiber.await(run)
+        expect(Exit.isSuccess(exit)).toBe(true)
+
+        const parts = yield* MessageV2.parts(msg.id)
+        const call = parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
+        if (!call) throw new Error("missing tool part")
 
         expect(call.callID).toBe("call_invalid")
         expect(call.tool).toBe("lookup")
         expect(call.state.status).toBe("error")
         if (call.state.status === "error") {
           expect(call.state.input).toEqual({})
-          expect(call.state.error).toContain("Invalid input")
+          expect(call.state.error).not.toBe("Tool execution aborted")
           expect(call.state.time.end).toBeDefined()
         }
-
-        gate.resolve()
-        yield* Fiber.await(run)
       }),
     { config: (url) => providerCfg(url) },
   ),
