@@ -4,7 +4,6 @@ type Local = {
   session: {
     reset(): void
     restore(msg: UserMessage): void
-    sync?(msg: UserMessage): void
   }
 }
 
@@ -13,9 +12,5 @@ export const resetSessionModel = (local: Local) => {
 }
 
 export const syncSessionModel = (local: Local, msg: UserMessage) => {
-  if (local.session.sync) {
-    local.session.sync(msg)
-    return
-  }
   local.session.restore(msg)
 }
