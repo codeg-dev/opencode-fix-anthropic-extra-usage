@@ -1,6 +1,6 @@
 {
   "name": "@opencode-ai/app",
-  "version": "1.17.13",
+  "version": "1.17.13-codeg.20260702-omo4151-retryonly",
   "description": "",
   "type": "module",
   "exports": {
