@@ -54,8 +54,29 @@ export async function readArrayBuffer(p: string): Promise<ArrayBuffer> {
   return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer
 }
 
+function hasCode(e: unknown, code: string) {
+  return typeof e === "object" && e !== null && "code" in e && e.code === code
+}
+
 function isEnoent(e: unknown): e is { code: "ENOENT" } {
-  return typeof e === "object" && e !== null && "code" in e && (e as { code: string }).code === "ENOENT"
+  return hasCode(e, "ENOENT")
+}
+
+function isEintr(e: unknown) {
+  return hasCode(e, "EINTR")
+}
+
+function realpathSyncRetry(p: string): string {
+  let error: unknown
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return realpathSync(p)
+    } catch (e) {
+      if (!isEintr(e)) throw e
+      error = e
+    }
+  }
+  throw error
 }
 
 export async function write(p: string, content: string | Buffer | Uint8Array, mode?: number): Promise<void> {
@@ -137,7 +158,7 @@ export function normalizePathPattern(p: string): string {
 export function resolve(p: string): string {
   const resolved = pathResolve(windowsPath(p))
   try {
-    return normalizePath(realpathSync(resolved))
+    return normalizePath(realpathSyncRetry(resolved))
   } catch (e) {
     if (isEnoent(e)) return normalizePath(resolved)
     throw e
