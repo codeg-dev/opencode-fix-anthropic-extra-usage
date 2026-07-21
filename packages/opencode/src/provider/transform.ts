@@ -95,6 +95,74 @@ function sdkKey(npm: string): string | undefined {
   return undefined
 }
 
+// Anthropic requires every tool_use block to be immediately followed by a matching
+// tool_result in the next message. Session replay (notably compaction) can break the
+// pairing, producing 400 "tool_use ids were found without tool_result blocks".
+// Defensive final pass: synthesize error tool-results for missing ids, drop orphan
+// tool-results whose id was never issued, and remove tool messages left empty.
+function repairAnthropicToolAdjacency(msgs: ModelMessage[]): ModelMessage[] {
+  const issued = new Map<string, string>()
+  for (const msg of msgs) {
+    if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue
+    for (const part of msg.content) {
+      if (part.type === "tool-call") issued.set(part.toolCallId, part.toolName)
+    }
+  }
+
+  // Pass 1: drop orphan tool-results (never-issued ids); drop emptied tool messages.
+  const cleaned: ModelMessage[] = []
+  for (const msg of msgs) {
+    if (msg.role === "tool" && Array.isArray(msg.content)) {
+      const kept = msg.content.filter((part) => part.type !== "tool-result" || issued.has(part.toolCallId))
+      if (kept.length === 0) continue
+      cleaned.push(kept.length === msg.content.length ? msg : { ...msg, content: kept })
+      continue
+    }
+    cleaned.push(msg)
+  }
+
+  // Pass 2: for each assistant message with tool-calls, ensure the immediately-following
+  // tool message answers every id; synthesize error results for missing ids.
+  const result: ModelMessage[] = []
+  for (let i = 0; i < cleaned.length; i++) {
+    const msg = cleaned[i]
+    result.push(msg)
+    if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue
+    const calls = msg.content.filter((part) => part.type === "tool-call")
+    if (calls.length === 0) continue
+    // A trailing assistant message with tool-calls is a valid in-progress turn
+    // (results arrive next turn) - only repair when something follows it.
+    if (i + 1 >= cleaned.length) continue
+    const next = cleaned[i + 1]
+    const answered = new Set<string>()
+    if (next && next.role === "tool" && Array.isArray(next.content)) {
+      for (const part of next.content) {
+        if (part.type === "tool-result") answered.add(part.toolCallId)
+      }
+    }
+    const missing = calls.filter((part) => !answered.has(part.toolCallId))
+    if (missing.length === 0) continue
+    const synthesized = missing.map(
+      (part) =>
+        ({
+          type: "tool-result",
+          toolCallId: part.toolCallId,
+          toolName: part.toolName,
+          output: {
+            type: "error-text",
+            value: "[opencode] tool result missing from history; synthesized during anthropic adjacency repair",
+          },
+        }) as ToolResultPart,
+    )
+    if (next && next.role === "tool" && Array.isArray(next.content)) {
+      next.content = [...next.content, ...synthesized]
+      continue
+    }
+    result.push({ role: "tool", content: synthesized })
+  }
+  return result
+}
+
 // TODO: fix this stupid inefficient dogshit function
 function normalizeMessages(
   msgs: ModelMessage[],
@@ -190,6 +258,7 @@ function normalizeMessages(
         return { ...msg, content: filtered }
       })
       .filter((msg): msg is ModelMessage => msg !== undefined && msg.content !== "")
+    msgs = repairAnthropicToolAdjacency(msgs)
   }
 
   // Bedrock specific transforms
