@@ -6195,3 +6195,136 @@ describe("ProviderTransform.options - kimi family adaptive thinking", () => {
     expect(result.thinking).toBeUndefined()
   })
 })
+
+describe("ProviderTransform.message - anthropic tool_use/tool_result adjacency repair", () => {
+  const mkModel = (npm: string) =>
+    ({
+      id: "anthropic/claude-3-5-sonnet",
+      providerID: "anthropic",
+      api: {
+        id: "claude-3-5-sonnet-20241022",
+        url: "https://api.anthropic.com",
+        npm,
+      },
+      name: "Claude 3.5 Sonnet",
+      capabilities: {
+        temperature: true,
+        reasoning: false,
+        attachment: true,
+        toolcall: true,
+        input: { text: true, audio: false, image: true, video: false, pdf: true },
+        output: { text: true, audio: false, image: false, video: false, pdf: false },
+        interleaved: false,
+      },
+      cost: { input: 0.003, output: 0.015, cache: { read: 0.0003, write: 0.00375 } },
+      limit: { context: 200000, output: 8192 },
+      status: "active",
+      options: {},
+      headers: {},
+    }) as any
+
+  const anthropicModel = mkModel("@ai-sdk/anthropic")
+  const openaiModel = mkModel("@ai-sdk/openai")
+
+  test("synthesizes missing tool_result immediately after assistant tool-call", () => {
+    const msgs = [
+      { role: "user", content: "hi" },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "running" },
+          { type: "tool-call", toolCallId: "toolu_test_orphan1", toolName: "bash", input: { cmd: "date" } },
+        ],
+      },
+      { role: "user", content: "next" },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, anthropicModel, {}) as any[]
+
+    expect(result).toHaveLength(4)
+    expect(result[1].role).toBe("assistant")
+    expect(result[2].role).toBe("tool")
+    const tr = result[2].content.find((p: any) => p.type === "tool-result" && p.toolCallId === "toolu_test_orphan1")
+    expect(tr).toBeDefined()
+    expect(tr.output.type).toBe("error-text")
+    expect(tr.output.value).toContain("anthropic adjacency repair")
+    expect(result[3].role).toBe("user")
+  })
+
+  test("synthesizes only missing ids on partial pairing into the existing following tool message", () => {
+    const msgs = [
+      {
+        role: "assistant",
+        content: [
+          { type: "tool-call", toolCallId: "toolu_a", toolName: "bash", input: {} },
+          { type: "tool-call", toolCallId: "toolu_b", toolName: "read", input: {} },
+        ],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "toolu_a", toolName: "bash", output: { type: "text", value: "ok" } }],
+      },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, anthropicModel, {}) as any[]
+
+    expect(result).toHaveLength(2)
+    const results = result[1].content.filter((p: any) => p.type === "tool-result")
+    expect(results.map((p: any) => p.toolCallId).sort()).toEqual(["toolu_a", "toolu_b"])
+    const synth = results.find((p: any) => p.toolCallId === "toolu_b")
+    expect(synth.output.type).toBe("error-text")
+  })
+
+  test("drops orphan tool_result with no preceding tool-call and removes emptied tool message", () => {
+    const msgs = [
+      { role: "user", content: "hi" },
+      {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "toolu_never_issued", toolName: "bash", output: { type: "text", value: "x" } }],
+      },
+      { role: "user", content: "bye" },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, anthropicModel, {}) as any[]
+
+    expect(result).toHaveLength(2)
+    expect(result.every((m: any) => m.role === "user")).toBe(true)
+  })
+
+  test("well-formed history passes through structurally unchanged", () => {
+    const msgs = [
+      { role: "user", content: "hi" },
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "toolu_ok", toolName: "bash", input: {} }],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "toolu_ok", toolName: "bash", output: { type: "text", value: "done" } }],
+      },
+      { role: "assistant", content: [{ type: "text", text: "finished" }] },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, anthropicModel, {}) as any[]
+
+    expect(result).toHaveLength(4)
+    expect(result[1].content.filter((p: any) => p.type === "tool-call")).toHaveLength(1)
+    expect(result[2].content.filter((p: any) => p.type === "tool-result")).toHaveLength(1)
+    expect(result[2].content[0].toolCallId).toBe("toolu_ok")
+  })
+
+  test("non-anthropic model is untouched by adjacency repair", () => {
+    const msgs = [
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "toolu_orphan_openai", toolName: "bash", input: {} }],
+      },
+      { role: "user", content: "next" },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, openaiModel, {}) as any[]
+
+    expect(result).toHaveLength(2)
+    expect(result.some((m: any) => m.role === "tool")).toBe(false)
+  })
+})
