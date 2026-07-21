@@ -64,7 +64,7 @@ const make = (options: Config) =>
           return Effect.fail(
             new SqlError({
               reason: classifySqliteError(cause, {
-                message: `Failed to execute statement: ${cause instanceof Error ? cause.message : String(cause)}`,
+                message: Sqlite.executeErrorMessage(cause),
                 operation: "execute",
               }),
             }),
@@ -83,7 +83,7 @@ const make = (options: Config) =>
           return Effect.fail(
             new SqlError({
               reason: classifySqliteError(cause, {
-                message: `Failed to execute statement: ${cause instanceof Error ? cause.message : String(cause)}`,
+                message: Sqlite.executeErrorMessage(cause),
                 operation: "execute",
               }),
             }),
