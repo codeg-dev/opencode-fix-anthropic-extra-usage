@@ -376,6 +376,21 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           })
         }
       }
+      // Strict OpenAI-compatible providers (e.g. Kimi via chat/completions)
+      // reject assistant messages whose serialized content is empty: the
+      // @ai-sdk/openai-compatible serializer emits content: "" (or null) for
+      // turns that carry tool calls without any text (ISS-5993, upstream
+      // anomalyco/opencode#37946). Inject a single-space text part so the
+      // wire content is non-empty. Scoped to openai-compatible: OpenAI and
+      // Anthropic accept textless tool-call turns, and Anthropic signed
+      // thinking is handled above.
+      if (
+        model.api.npm === "@ai-sdk/openai-compatible" &&
+        assistantMessage.parts.some((part) => part.type.startsWith("tool-")) &&
+        !assistantMessage.parts.some((part) => part.type === "text" && part.text !== "")
+      ) {
+        assistantMessage.parts.unshift({ type: "text", text: " " })
+      }
       if (assistantMessage.parts.length > 0) {
         result.push(assistantMessage)
         // Inject pending media as a user message for providers that don't support
