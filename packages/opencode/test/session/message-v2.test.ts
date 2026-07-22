@@ -1580,6 +1580,89 @@ describe("session.message-v2.toModelMessage", () => {
     const texts = content.filter((part) => part.type === "text")
     expect(texts.map((part) => part.text)).toStrictEqual(["done"])
   })
+
+  test("injects placeholder text into every step-start split piece on openai-compatible providers", async () => {
+    // A multi-step turn splits into separate wire messages at step-start;
+    // the piece after the split also needs non-empty content (regression:
+    // Kimi 400 moved from position 14 to position 17 when only the first
+    // piece was patched).
+    const userID = "m-user-oc-split"
+    const assistantID = "m-assistant-oc-split"
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "run tools",
+          },
+        ] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "ls" },
+              output: "ok",
+              title: "Bash",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
+          },
+          { ...basePart(assistantID, "a2"), type: "step-start" },
+          {
+            ...basePart(assistantID, "a3"),
+            type: "tool",
+            callID: "call-2",
+            tool: "read",
+            state: {
+              status: "completed",
+              input: { path: "/tmp" },
+              output: "ok",
+              title: "Read",
+              metadata: {},
+              time: { start: 1, end: 2 },
+            },
+          },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, kimiModel)
+
+    const assistants = result.filter((msg) => msg.role === "assistant")
+    expect(assistants).toHaveLength(2)
+    for (const assistant of assistants) {
+      const content = assistant.content as any[]
+      const texts = content.filter((part) => part.type === "text")
+      expect(texts.map((part) => part.text)).toStrictEqual([" "])
+      expect(content.some((part) => part.type === "tool-call")).toBe(true)
+    }
+  })
+
+  test("injects placeholder text for empty-text-only assistant messages on openai-compatible providers", async () => {
+    const assistantID = "m-assistant-oc-emptytext"
+    const input: SessionV1.WithParts[] = [
+      {
+        info: assistantInfo(assistantID, "m-parent"),
+        parts: [{ ...basePart(assistantID, "a1"), type: "text", text: "" }] as SessionV1.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, kimiModel)
+
+    expect(result).toHaveLength(1)
+    const content = result[0].content as any[]
+    const texts = content.filter((part) => part.type === "text")
+    expect(texts.map((part) => part.text)).toStrictEqual([" ", ""])
+  })
 })
 
 describe("session.message-v2.fromError", () => {
