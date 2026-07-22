@@ -376,21 +376,6 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           })
         }
       }
-      // Strict OpenAI-compatible providers (e.g. Kimi via chat/completions)
-      // reject assistant messages whose serialized content is empty: the
-      // @ai-sdk/openai-compatible serializer emits content: "" (or null) for
-      // turns that carry tool calls without any text (ISS-5993, upstream
-      // anomalyco/opencode#37946). Inject a single-space text part so the
-      // wire content is non-empty. Scoped to openai-compatible: OpenAI and
-      // Anthropic accept textless tool-call turns, and Anthropic signed
-      // thinking is handled above.
-      if (
-        model.api.npm === "@ai-sdk/openai-compatible" &&
-        assistantMessage.parts.some((part) => part.type.startsWith("tool-")) &&
-        !assistantMessage.parts.some((part) => part.type === "text" && part.text !== "")
-      ) {
-        assistantMessage.parts.unshift({ type: "text", text: " " })
-      }
       if (assistantMessage.parts.length > 0) {
         result.push(assistantMessage)
         // Inject pending media as a user message for providers that don't support
@@ -419,7 +404,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
 
   const tools = Object.fromEntries(Array.from(toolNames).map((toolName) => [toolName, { toModelOutput }]))
 
-  return yield* Effect.promise(() =>
+  const messages = yield* Effect.promise(() =>
     convertToModelMessages(
       result.filter((msg) => msg.parts.some((part) => part.type !== "step-start")),
       {
@@ -428,6 +413,32 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
       },
     ),
   )
+
+  // Strict OpenAI-compatible providers (e.g. Kimi via chat/completions)
+  // reject assistant messages whose serialized content is empty: the
+  // @ai-sdk/openai-compatible serializer emits content: "" (or null) for
+  // wire messages without any non-empty text — e.g. tool-call-only turns,
+  // or the per-step pieces produced by step-start splitting (ISS-5993,
+  // upstream anomalyco/opencode#37946). Inject a single-space text part so
+  // the wire content is non-empty. This runs on the final ModelMessage list
+  // so every split piece is covered individually. Scoped to
+  // openai-compatible: OpenAI and Anthropic accept textless tool-call
+  // turns, and Anthropic signed thinking is handled before conversion.
+  if (model.api.npm === "@ai-sdk/openai-compatible") {
+    for (const message of messages) {
+      if (message.role !== "assistant") continue
+      if (typeof message.content === "string") {
+        if (message.content === "") message.content = " "
+        continue
+      }
+      const hasNonEmptyText = message.content.some((part) => part.type === "text" && part.text !== "")
+      if (!hasNonEmptyText) {
+        message.content.unshift({ type: "text", text: " " })
+      }
+    }
+  }
+
+  return messages
 })
 
 export function toModelMessages(
