@@ -427,6 +427,49 @@ function normalizeMessages(
   return msgs
 }
 
+function addAnthropicLeadingUserBoundary(msgs: ModelMessage[], model: Provider.Model): ModelMessage[] {
+  if (!["@ai-sdk/anthropic", "@ai-sdk/google-vertex/anthropic"].includes(model.api.npm)) return msgs
+
+  // A compacted conversation can begin mid-tool-exchange, i.e. the first
+  // non-system message is an assistant turn whose tool-calls are answered by the
+  // very next tool message. On the wire that makes the FIRST user-role message a
+  // tool_result carrier. Anthropic requires such a message to LEAD with its
+  // tool_result blocks, so any proxy or middlebox that prepends context text to
+  // the first user message silently produces
+  //   "tool_use ids were found without tool_result blocks immediately after".
+  // Insert a real leading user turn so the tool_result carrier is never first.
+  // ISS-10298.
+  const first = msgs.findIndex((msg) => msg.role !== "system")
+  if (first === -1) return msgs
+
+  const msg = msgs[first]
+  if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) return msgs
+
+  const calls = msg.content.filter((part) => part.type === "tool-call")
+  if (calls.length === 0) return msgs
+
+  const next = msgs[first + 1]
+  if (!next || next.role !== "tool" || !Array.isArray(next.content)) return msgs
+
+  const answered = new Set<string>()
+  for (const part of next.content) {
+    if (part.type === "tool-result") answered.add(part.toolCallId)
+  }
+  if (!calls.every((part) => answered.has(part.toolCallId))) return msgs
+
+  const boundary: ModelMessage = {
+    role: "user",
+    content: [
+      {
+        type: "text",
+        text: "Previous user turn was omitted from the compacted conversation; continue from the following tool exchange.",
+      },
+    ],
+  }
+
+  return [...msgs.slice(0, first), boundary, ...msgs.slice(first)]
+}
+
 function applyCaching(msgs: ModelMessage[], model: Provider.Model): ModelMessage[] {
   const system = msgs.filter((msg) => msg.role === "system").slice(0, 2)
   const final = msgs.filter((msg) => msg.role !== "system").slice(-2)
@@ -537,6 +580,7 @@ function mapProviderOptions(
 export function message(msgs: ModelMessage[], model: Provider.Model, options: Record<string, unknown>) {
   msgs = unsupportedParts(msgs, model)
   msgs = normalizeMessages(msgs, model, options)
+  msgs = addAnthropicLeadingUserBoundary(msgs, model)
   const usesAnthropicAutomaticCaching =
     options.cacheControl !== undefined &&
     (model.api.npm === "@ai-sdk/anthropic" || model.api.npm === "@ai-sdk/google-vertex/anthropic")
