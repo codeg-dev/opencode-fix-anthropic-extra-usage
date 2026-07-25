@@ -2279,9 +2279,12 @@ describe("ProviderTransform.message - anthropic empty content filtering", () => 
 
     const result = ProviderTransform.message(msgs, anthropicModel, {}) as any[]
 
+    // ISS-10298: a history that opens on an answered assistant tool-call gains a
+    // leading user turn, so the tool_result carrier is never the first user message.
+    expect(result[0].role).toBe("user")
     // intent: the empty-text filter must not drop the tool-call part
-    expect(result[0].content).toHaveLength(1)
-    expect(result[0].content[0]).toEqual({
+    expect(result[1].content).toHaveLength(1)
+    expect(result[1].content[0]).toEqual({
       type: "tool-call",
       toolCallId: "123",
       toolName: "bash",
@@ -2290,9 +2293,9 @@ describe("ProviderTransform.message - anthropic empty content filtering", () => 
     // ISS-10270: an otherwise trailing tool-call now also gets its tool_result
     // synthesized, because Anthropic rejects any request that ends on an
     // unanswered tool_use.
-    expect(result).toHaveLength(2)
-    expect(result[1].role).toBe("tool")
-    expect(result[1].content.map((p: any) => p.toolCallId)).toEqual(["123"])
+    expect(result).toHaveLength(3)
+    expect(result[2].role).toBe("tool")
+    expect(result[2].content.map((p: any) => p.toolCallId)).toEqual(["123"])
   })
 
   test("keeps messages with valid text alongside empty parts", () => {
@@ -2387,16 +2390,18 @@ describe("ProviderTransform.message - anthropic empty content filtering", () => 
 
     const result = ProviderTransform.message(msgs, anthropicModel, {}) as any[]
 
+    // ISS-10298: leading user boundary is inserted ahead of the assistant turn.
+    expect(result[0].role).toBe("user")
     // intent: text/tool-call ordering inside the assistant message is preserved
-    expect(result[0].content).toMatchObject([
+    expect(result[1].content).toMatchObject([
       { type: "text", text: "I checked your home directory and looked for PDF files." },
       { type: "tool-call", toolCallId: "toolu_1", toolName: "read", input: { filePath: "/root" } },
       { type: "tool-call", toolCallId: "toolu_2", toolName: "glob", input: { pattern: "**/*.pdf" } },
     ])
     // ISS-10270: both trailing tool-calls now get synthesized tool_results
-    expect(result).toHaveLength(2)
-    expect(result[1].role).toBe("tool")
-    expect(result[1].content.map((p: any) => p.toolCallId)).toEqual(["toolu_1", "toolu_2"])
+    expect(result).toHaveLength(3)
+    expect(result[2].role).toBe("tool")
+    expect(result[2].content.map((p: any) => p.toolCallId)).toEqual(["toolu_1", "toolu_2"])
   })
 })
 
@@ -5616,8 +5621,9 @@ describe("ProviderTransform.message - anthropic tool_use/tool_result adjacency r
 
     const result = ProviderTransform.message(msgs, anthropicModel, {}) as any[]
 
-    expect(result).toHaveLength(2)
-    const results = result[1].content.filter((p: any) => p.type === "tool-result")
+    expect(result).toHaveLength(3)
+    expect(result[0].role).toBe("user")
+    const results = result[2].content.filter((p: any) => p.type === "tool-result")
     expect(results.map((p: any) => p.toolCallId).sort()).toEqual(["toolu_a", "toolu_b"])
     const synth = results.find((p: any) => p.toolCallId === "toolu_b")
     expect(synth.output.type).toBe("error-text")
@@ -5744,5 +5750,106 @@ describe("ProviderTransform.message - anthropic tool_use/tool_result adjacency r
 
     expect(result).toHaveLength(2)
     expect(result.some((m: any) => m.role === "tool")).toBe(false)
+  })
+})
+
+describe("ProviderTransform.message - anthropic leading user boundary", () => {
+  const anthropicModel = {
+    id: "anthropic/claude-opus-5",
+    providerID: "anthropic",
+    api: { id: "claude-opus-5", url: "https://api.anthropic.com", npm: "@ai-sdk/anthropic" },
+    name: "Claude Opus 5",
+    capabilities: {
+      temperature: true,
+      reasoning: true,
+      attachment: true,
+      toolcall: true,
+      input: { text: true, audio: false, image: true, video: false, pdf: true },
+      output: { text: true, audio: false, image: false, video: false, pdf: false },
+      interleaved: false,
+    },
+    cost: { input: 5, output: 25, cache: { read: 0.5, write: 6.25 } },
+    limit: { context: 1000000, output: 128000 },
+    status: "active",
+    options: {},
+    headers: {},
+  } as any
+
+  const compactedHead = () =>
+    [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "asking" },
+          { type: "tool-call", toolCallId: "toolu_lead1", toolName: "question", input: {} },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "toolu_lead1",
+            toolName: "question",
+            output: { type: "text", value: "answered" },
+          },
+        ],
+      },
+      { role: "user", content: [{ type: "text", text: "next turn" }] },
+    ] as any
+
+  test("inserts a user turn so the tool_result carrier is never the first user message", () => {
+    const result = ProviderTransform.message(compactedHead(), anthropicModel, {}) as any[]
+
+    expect(result[0].role).toBe("user")
+    expect(result[0].content[0].type).toBe("text")
+    expect(result[1].role).toBe("assistant")
+    expect(result[1].content.at(-1)).toMatchObject({ type: "tool-call", toolCallId: "toolu_lead1" })
+    expect(result[2].role).toBe("tool")
+    expect(result[2].content[0]).toMatchObject({ type: "tool-result", toolCallId: "toolu_lead1" })
+  })
+
+  test("leaves non-anthropic providers untouched", () => {
+    const result = ProviderTransform.message(compactedHead(), {
+      ...anthropicModel,
+      id: "custom/model",
+      providerID: "custom",
+      api: { id: "model", url: "https://example.com/v1", npm: "@ai-sdk/openai-compatible" },
+    } as any, {}) as any[]
+
+    expect(result[0].role).toBe("assistant")
+  })
+
+  test("leaves arrays that already start with a user message untouched", () => {
+    const msgs = [{ role: "user", content: [{ type: "text", text: "hello" }] }, ...compactedHead()] as any
+    const result = ProviderTransform.message(msgs, anthropicModel, {}) as any[]
+
+    expect(result[0].role).toBe("user")
+    expect(result[0].content[0].text).toBe("hello")
+    expect(result[1].role).toBe("assistant")
+  })
+
+  test("does not insert when the leading assistant turn has no tool-calls", () => {
+    const msgs = [
+      { role: "assistant", content: [{ type: "text", text: "resuming" }] },
+      { role: "user", content: [{ type: "text", text: "hi" }] },
+    ] as any
+    const result = ProviderTransform.message(msgs, anthropicModel, {}) as any[]
+
+    expect(result[0].role).toBe("assistant")
+    expect(result).toHaveLength(2)
+  })
+
+  test("a leading tool-call left unanswered is first completed by the adjacency repair, then bounded", () => {
+    const msgs = [
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "toolu_lead2", toolName: "question", input: {} }],
+      },
+    ] as any
+    const result = ProviderTransform.message(msgs, anthropicModel, {}) as any[]
+
+    expect(result.map((m: any) => m.role)).toEqual(["user", "assistant", "tool"])
+    expect(result[2].content[0]).toMatchObject({ type: "tool-result", toolCallId: "toolu_lead2" })
   })
 })
