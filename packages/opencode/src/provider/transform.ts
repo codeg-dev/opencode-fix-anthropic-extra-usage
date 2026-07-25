@@ -132,9 +132,12 @@ function repairAnthropicToolAdjacency(msgs: ModelMessage[]): ModelMessage[] {
     if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue
     const calls = msg.content.filter((part) => part.type === "tool-call")
     if (calls.length === 0) continue
-    // A trailing assistant message with tool-calls is a valid in-progress turn
-    // (results arrive next turn) - only repair when something follows it.
-    if (i + 1 >= cleaned.length) continue
+    // A trailing assistant tool-call is not a valid outbound request either.
+    // Anthropic rejects any request whose final message leaves a tool_use
+    // unanswered; verified against the live API, which then reports the orphan's
+    // own index (messages.N) instead of the following index (messages.N+1).
+    // `next` is undefined here, so the code below falls through to appending a
+    // fresh tool message. ISS-10270.
     const next = cleaned[i + 1]
     const answered = new Set<string>()
     if (next && next.role === "tool" && Array.isArray(next.content)) {
