@@ -5733,6 +5733,76 @@ describe("ProviderTransform.message - anthropic tool_use/tool_result adjacency r
     expect(result[2].content[0].toolCallId).toBe("toolu_ok")
   })
 
+  test("synthesizes tool_result for a TRAILING assistant tool-call (ISS-10270)", () => {
+    // Verified against the live Anthropic API: a request whose final message is
+    // an assistant with an unanswered tool_use is rejected with
+    // "messages.1: `tool_use` ids were found without `tool_result` blocks
+    // immediately after" - i.e. the orphan's own index. A trailing tool-call is
+    // therefore never a valid outbound request and must be repaired.
+    const msgs = [
+      { role: "user", content: "hi" },
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "toolu_test_trailing1", toolName: "bash", input: { cmd: "date" } }],
+      },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, anthropicModel, {}) as any[]
+
+    expect(result).toHaveLength(3)
+    expect(result[1].role).toBe("assistant")
+    expect(result[2].role).toBe("tool")
+    const tr = result[2].content.find((p: any) => p.type === "tool-result" && p.toolCallId === "toolu_test_trailing1")
+    expect(tr).toBeDefined()
+    expect(tr.output.type).toBe("error-text")
+    expect(tr.output.value).toContain("anthropic adjacency repair")
+  })
+
+  test("repairs the observed ISS-10270 compaction shape [user, assistant, trailing assistant tool-call]", () => {
+    // Shape reconstructed from the 2026-07-25T06:50:53Z failure on
+    // ses_0687a8ce0ffeFu3PFhM9xpTmXe: Anthropic reported `messages.2`, which for
+    // a trailing orphan means the offending tool_use sat at payload index 2.
+    const msgs = [
+      { role: "user", content: "What did we do so far?" },
+      { role: "assistant", content: [{ type: "text", text: "summary of prior work" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "continuing" },
+          {
+            type: "tool-call",
+            toolCallId: "toolu_01MapEiMd2c1dcVBiKrnC8D8",
+            toolName: "bash",
+            input: { command: "true" },
+          },
+        ],
+      },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, anthropicModel, {}) as any[]
+
+    const last = result[result.length - 1]
+    expect(last.role).toBe("tool")
+    const tr = last.content.find(
+      (p: any) => p.type === "tool-result" && p.toolCallId === "toolu_01MapEiMd2c1dcVBiKrnC8D8",
+    )
+    expect(tr).toBeDefined()
+    expect(tr.output.value).toContain("anthropic adjacency repair")
+
+    // no assistant tool-call may be left unanswered anywhere in the payload
+    const issued = new Set<string>()
+    for (const m of result) {
+      if (m.role !== "assistant" || !Array.isArray(m.content)) continue
+      for (const p of m.content) if (p.type === "tool-call") issued.add(p.toolCallId)
+    }
+    const answered = new Set<string>()
+    for (const m of result) {
+      if (m.role !== "tool" || !Array.isArray(m.content)) continue
+      for (const p of m.content) if (p.type === "tool-result") answered.add(p.toolCallId)
+    }
+    expect([...issued].filter((id) => !answered.has(id))).toEqual([])
+  })
+
   test("non-anthropic model is untouched by adjacency repair", () => {
     const msgs = [
       {
