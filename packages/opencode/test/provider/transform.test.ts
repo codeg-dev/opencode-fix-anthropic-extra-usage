@@ -2649,9 +2649,9 @@ describe("ProviderTransform.message - anthropic empty content filtering", () => 
       },
     ] as any[]
 
-    const result = ProviderTransform.message(msgs, anthropicModel, {})
+    const result = ProviderTransform.message(msgs, anthropicModel, {}) as any[]
 
-    expect(result).toHaveLength(1)
+    // intent: the empty-text filter must not drop the tool-call part
     expect(result[0].content).toHaveLength(1)
     expect(result[0].content[0]).toEqual({
       type: "tool-call",
@@ -2659,6 +2659,12 @@ describe("ProviderTransform.message - anthropic empty content filtering", () => 
       toolName: "bash",
       input: { command: "ls" },
     })
+    // ISS-10270: an otherwise trailing tool-call now also gets its tool_result
+    // synthesized, because Anthropic rejects any request that ends on an
+    // unanswered tool_use.
+    expect(result).toHaveLength(2)
+    expect(result[1].role).toBe("tool")
+    expect(result[1].content.map((p: any) => p.toolCallId)).toEqual(["123"])
   })
 
   test("keeps messages with valid text alongside empty parts", () => {
@@ -2881,12 +2887,16 @@ describe("ProviderTransform.message - anthropic empty content filtering", () => 
 
     const result = ProviderTransform.message(msgs, anthropicModel, {}) as any[]
 
-    expect(result).toHaveLength(1)
+    // intent: text/tool-call ordering inside the assistant message is preserved
     expect(result[0].content).toMatchObject([
       { type: "text", text: "I checked your home directory and looked for PDF files." },
       { type: "tool-call", toolCallId: "toolu_1", toolName: "read", input: { filePath: "/root" } },
       { type: "tool-call", toolCallId: "toolu_2", toolName: "glob", input: { pattern: "**/*.pdf" } },
     ])
+    // ISS-10270: both trailing tool-calls now get synthesized tool_results
+    expect(result).toHaveLength(2)
+    expect(result[1].role).toBe("tool")
+    expect(result[1].content.map((p: any) => p.toolCallId)).toEqual(["toolu_1", "toolu_2"])
   })
 })
 
