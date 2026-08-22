@@ -417,8 +417,8 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
   // reject assistant messages whose serialized content is empty: the
   // @ai-sdk/openai-compatible serializer emits content: "" (or null) for
   // wire messages without any non-empty text — e.g. tool-call-only turns,
-  // or the per-step pieces produced by step-start splitting (upstream
-  // upstream anomalyco/opencode#37946). Inject a single-space text part so
+  // or the per-step pieces produced by step-start splitting
+  // (anomalyco/opencode#37946). Inject a single-space text part so
   // the wire content is non-empty. This runs on the final ModelMessage list
   // so every split piece is covered individually. Scoped to
   // openai-compatible: OpenAI and Anthropic accept textless tool-call
