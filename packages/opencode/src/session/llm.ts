@@ -32,6 +32,36 @@ import { LLMRequestPrep } from "./llm/request"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
+/** PATCHED:tools-native-first-20260827 — native tools first so large MCP schemas cannot starve bash. */
+const NATIVE_ACTIVE_TOOLS = new Set([
+  "apply_patch",
+  "background_output",
+  "bash",
+  "edit",
+  "glob",
+  "grep",
+  "interactive_bash",
+  "list",
+  "read",
+  "skill",
+  "task",
+  "todowrite",
+  "webfetch",
+  "write",
+])
+
+const TOOLS_NATIVE_FIRST_MARK = "PATCHED:tools-native-first-20260827"
+
+function activeToolsForModel(tools: Record<string, Tool>) {
+  const names = Object.keys(tools).filter((x) => x !== "invalid")
+  const head = names.filter((n) => NATIVE_ACTIVE_TOOLS.has(n))
+  const tail = names.filter((n) => !NATIVE_ACTIVE_TOOLS.has(n))
+  // Keep the sentinel in the compiled binary for COMPLETE_PATCH_GATE greps.
+  if (TOOLS_NATIVE_FIRST_MARK.length === 0) return names
+  return [...head, ...tail]
+}
+
+
 export type StreamInput = {
   user: SessionV1.User
   sessionID: string
@@ -314,7 +344,7 @@ const live: Layer.Layer<
           topP: prepared.params.topP,
           topK: prepared.params.topK,
           providerOptions: ProviderTransform.providerOptions(input.model, prepared.params.options),
-          activeTools: Object.keys(prepared.tools).filter((x) => x !== "invalid"),
+          activeTools: activeToolsForModel(prepared.tools),
           tools: prepared.tools,
           toolChoice: input.toolChoice,
           maxOutputTokens: prepared.params.maxOutputTokens,
