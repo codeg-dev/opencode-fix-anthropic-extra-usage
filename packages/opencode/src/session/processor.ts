@@ -27,6 +27,12 @@ import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
 
 const DOOM_LOOP_THRESHOLD = 3
+// Cap on total tool calls inside a SINGLE assistant message. The identical-tail
+// check above only catches an unbroken run of the same tool with the same input,
+// so a model that interleaves tools or varies arguments can burn an unbounded
+// number of calls in one turn (ISS-11349). Measured healthy ceiling across 18134
+// real assistant messages was 22 calls, so 40 leaves ~2x headroom.
+const DOOM_LOOP_TURN_TOTAL_THRESHOLD = 40
 export type Result = "compact" | "stop" | "continue"
 
 export interface Handle {
@@ -355,16 +361,20 @@ const layer = Layer.effect(
             )
             const recentParts = parts.slice(-DOOM_LOOP_THRESHOLD)
 
-            if (
-              recentParts.length !== DOOM_LOOP_THRESHOLD ||
-              !recentParts.every(
+            const repeatsIdentically =
+              recentParts.length === DOOM_LOOP_THRESHOLD &&
+              recentParts.every(
                 (part) =>
                   part.type === "tool" &&
                   part.tool === value.name &&
                   part.state.status !== "pending" &&
                   JSON.stringify(part.state.input) === JSON.stringify(input),
               )
-            ) {
+
+            const turnToolCalls = parts.filter((part) => part.type === "tool").length
+            const exceedsTurnBudget = turnToolCalls >= DOOM_LOOP_TURN_TOTAL_THRESHOLD
+
+            if (!repeatsIdentically && !exceedsTurnBudget) {
               return
             }
 
@@ -373,7 +383,7 @@ const layer = Layer.effect(
               permission: "doom_loop",
               patterns: [value.name],
               sessionID: ctx.assistantMessage.sessionID,
-              metadata: { tool: value.name, input },
+              metadata: { tool: value.name, input, turnToolCalls, reason: repeatsIdentically ? "repeated" : "turn-budget" },
               always: [value.name],
               ruleset: agent.permission,
             })

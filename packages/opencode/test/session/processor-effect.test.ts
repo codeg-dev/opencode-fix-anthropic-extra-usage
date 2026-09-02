@@ -2,6 +2,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2Bridge } from "@/event-v2-bridge"
+import { Permission } from "@/permission"
 import { expect } from "bun:test"
 import { tool } from "ai"
 import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
@@ -1169,3 +1170,199 @@ itFragmentFailure.live("session.processor effect tests retain partial legacy par
     { config: cfg },
   ),
 )
+
+// ---------------------------------------------------------------------------
+// Intra-turn tool-call storm guard (ISS-11349)
+// ---------------------------------------------------------------------------
+
+// Production shape: doom_loop defaults to "ask" (agent.ts). A tripped guard therefore
+// SUSPENDS the storm on a permission request instead of silently continuing. We observe
+// the emitted permission.asked event, which is the real circuit-breaker signal.
+function stormAgent(): Agent.Info {
+  return {
+    name: "build",
+    mode: "primary",
+    options: {},
+    permission: [
+      { permission: "*", pattern: "*", action: "allow" },
+      { permission: "doom_loop", pattern: "*", action: "ask" },
+    ],
+  }
+}
+
+const stormTools = {
+  alpha: tool({
+    description: "Alpha probe",
+    inputSchema: z.object({ query: z.string() }),
+    execute: async (input: { query: string }) => ({
+      title: "alpha",
+      output: "alpha:" + input.query,
+      metadata: {},
+    }),
+  }),
+  beta: tool({
+    description: "Beta probe",
+    inputSchema: z.object({ query: z.string() }),
+    execute: async (input: { query: string }) => ({
+      title: "beta",
+      output: "beta:" + input.query,
+      metadata: {},
+    }),
+  }),
+}
+
+const stormChunk = (delta: Record<string, unknown>) => ({
+  id: "chatcmpl-test",
+  object: "chat.completion.chunk",
+  choices: [{ delta }],
+})
+
+const stormBurst = (calls: { name: string; input: unknown }[]) => {
+  const chunks: unknown[] = [stormChunk({ role: "assistant" })]
+  calls.forEach((call, index) => {
+    chunks.push(
+      stormChunk({
+        tool_calls: [
+          { index, id: "call_" + (index + 1), type: "function", function: { name: call.name, arguments: "" } },
+        ],
+      }),
+    )
+    chunks.push(
+      stormChunk({
+        tool_calls: [{ index, function: { arguments: JSON.stringify(call.input) } }],
+      }),
+    )
+  })
+  chunks.push({
+    id: "chatcmpl-test",
+    object: "chat.completion.chunk",
+    choices: [{ delta: {}, finish_reason: "tool_calls" }],
+  })
+  return raw({ chunks })
+}
+
+const runStorm = (
+  dir: string,
+  calls: { name: string; input: unknown }[],
+  llm: { push: (...input: any[]) => Effect.Effect<unknown> },
+) =>
+  Effect.gen(function* () {
+    const { processors, session, provider } = yield* boot()
+    const events = yield* EventV2Bridge.Service
+
+    const asked: string[] = []
+    const off = yield* events.listen((event) => {
+      if (event.type === Permission.Event.Asked.type) {
+        const data = event.data as { permission?: string }
+        if (data.permission) asked.push(data.permission)
+      }
+      return Effect.void
+    })
+
+    yield* llm.push(stormBurst(calls))
+
+    const chat = yield* session.create({})
+    const parent = yield* user(chat.id, "storm")
+    const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+    const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+    const handle = yield* processors.create({
+      assistantMessage: msg,
+      sessionID: chat.id,
+      model: mdl,
+    })
+
+    const run = yield* handle
+      .process({
+        user: {
+          id: parent.id,
+          sessionID: chat.id,
+          role: "user",
+          time: parent.time,
+          agent: parent.agent,
+          model: { providerID: ref.providerID, modelID: ref.modelID },
+        } satisfies SessionV1.User,
+        sessionID: chat.id,
+        model: mdl,
+        agent: stormAgent(),
+        system: [],
+        messages: [{ role: "user", content: "storm" }],
+        tools: stormTools,
+      })
+      .pipe(Effect.forkChild)
+
+    // The guard either trips (permission asked -> storm suspended) or the run
+    // completes without ever asking. Both settle quickly; nothing sleeps on time.
+    const tripped = yield* Effect.raceFirst(
+      waitFor(
+        Effect.sync(() => (asked.includes("doom_loop") ? true : undefined)),
+        "no doom_loop permission was requested",
+      ).pipe(Effect.orElseSucceed(() => false)),
+      Fiber.await(run).pipe(Effect.as(false)),
+    )
+
+    yield* Fiber.interrupt(run)
+    yield* off
+
+    const parts = yield* MessageV2.parts(msg.id)
+    const toolParts = parts.filter((part): part is SessionV1.ToolPart => part.type === "tool")
+    return { total: toolParts.length, tripped: tripped || asked.includes("doom_loop") }
+  })
+
+it.live("session.processor stops an intra-turn storm of alternating tool calls", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        // Two distinct tools interleaved: the legacy guard required an unbroken
+        // run of identical (tool,input) tail parts, so this pattern never tripped
+        // it no matter how many calls arrived (ISS-11349: 1,228 parts in one turn).
+        const calls = Array.from({ length: 42 }, (_, index) => ({
+          name: index % 2 === 0 ? "alpha" : "beta",
+          input: { query: "same" },
+        }))
+
+        const result = yield* runStorm(dir, calls, llm)
+
+        expect(result.tripped).toBe(true)
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor stops an intra-turn storm of one tool with varying input", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        // Same tool, but the input changes every call, so the identical-input
+        // predicate never matched either.
+        const calls = Array.from({ length: 42 }, (_, index) => ({
+          name: "alpha",
+          input: { query: `page-${index}` },
+        }))
+
+        const result = yield* runStorm(dir, calls, llm)
+
+        expect(result.tripped).toBe(true)
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor allows a normal burst of parallel tool calls", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        // Healthy parallel fan-out must stay untouched.
+        const calls = Array.from({ length: 6 }, (_, index) => ({
+          name: index % 2 === 0 ? "alpha" : "beta",
+          input: { query: `item-${index}` },
+        }))
+
+        const result = yield* runStorm(dir, calls, llm)
+
+        expect(result.total).toBe(6)
+        expect(result.tripped).toBe(false)
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
