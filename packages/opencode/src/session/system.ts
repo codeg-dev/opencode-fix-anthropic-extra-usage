@@ -74,7 +74,7 @@ const layer = Layer.effect(
           )
         }).pipe(
           Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))),
-          Effect.catchAll(() => Effect.succeed([] as Array<{ name: string; path: string; description?: string }>)),
+          Effect.catchCause(() => Effect.succeed([])),
         )
         return [
           [
